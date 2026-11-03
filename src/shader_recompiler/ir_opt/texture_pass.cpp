@@ -8,16 +8,21 @@
 #include <algorithm>
 #include <bit>
 #include <optional>
+#include <queue>
+#include <string>
+#include <fmt/format.h>
 #include "common/container/unordered_map.h"
 #include <tuple>
 #include <limits>
 #include <boost/container/small_vector.hpp>
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
 #include "shader_recompiler/frontend/ir/breadth_first_search.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
+#include "shader_recompiler/frontend/ir/opcodes.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/shader_info.h"
@@ -326,10 +331,82 @@ static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Env
 
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info);
 
+/// Prints an instruction tree (opcodes and immediates), to see what a handle is computed from.
+std::string DescribeValue(const IR::Value& value, int depth) {
+    if (value.IsImmediate()) {
+        return value.Type() == IR::Type::U32 ? fmt::format("{:#x}", value.U32()) : "imm";
+    }
+    const IR::Inst* const inst{value.InstRecursive()};
+    std::string out{IR::NameOf(inst->GetOpcode())};
+    out += '(';
+    if (depth <= 0) {
+        return out + "..)";
+    }
+    for (size_t i = 0; i < inst->NumArgs(); ++i) {
+        if (i != 0) {
+            out += ", ";
+        }
+        out += DescribeValue(inst->Arg(i), depth - 1);
+    }
+    return out + ')';
+}
+
+/// Like IR::BreadthFirstSearch, but a constant buffer read is a source: its operands compute the
+/// address of the read, they are not where the value comes from. Descending into them reported
+/// an unrelated constant (an index or a float) as the handle when the read itself could not be
+/// tracked.
+std::optional<ConstBufferAddr> SearchWithoutAddressOperands(const IR::Value& value, Environment& env,
+                                                           const HostTranslateInfo& host_info) {
+    if (value.IsImmediate()) {
+        return std::nullopt;
+    }
+    boost::container::small_vector<const IR::Inst*, 8> visited;
+    std::queue<const IR::Inst*> queue;
+    queue.push(value.InstRecursive());
+    while (!queue.empty()) {
+        const IR::Inst* const inst{queue.front()};
+        queue.pop();
+        if (const auto result{TryGetConstBuffer(inst, env, host_info)}) {
+            return result;
+        }
+        if (inst->GetOpcode() == IR::Opcode::GetCbufU32 ||
+            inst->GetOpcode() == IR::Opcode::GetCbufU32x2) {
+            continue;
+        }
+        for (size_t arg = inst->NumArgs(); arg--;) {
+            const IR::Value arg_value{inst->Arg(arg)};
+            if (arg_value.IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* const arg_inst{arg_value.InstRecursive()};
+            if (std::ranges::find(visited, arg_inst) == visited.end()) {
+                visited.push_back(arg_inst);
+                queue.push(arg_inst);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info) {
-    return IR::BreadthFirstSearch(value, [&env, &host_info](const IR::Inst* inst) {
+    if (auto strict{SearchWithoutAddressOperands(value, env, host_info)}) {
+        return strict;
+    }
+    // Previous behaviour, kept so that no shader that compiled before stops compiling.
+    auto loose{IR::BreadthFirstSearch(value, [&env, &host_info](const IR::Inst* inst) {
         return TryGetConstBuffer(inst, env, host_info);
-    });
+    })};
+    if (loose) {
+        static u32 logged{};
+        if (logged < 24) {
+            ++logged;
+            LOG_WARNING(Shader,
+                        "Texture handle tracking used an address operand: cbuf {} + {:#x}; handle "
+                        "= {}",
+                        loose->index, loose->offset, DescribeValue(value, 7));
+        }
+    }
+    return loose;
 }
 
 std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
