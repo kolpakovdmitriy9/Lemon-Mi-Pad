@@ -628,11 +628,63 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
                 Texture(ctx, info, index), coords, dref, operands.Mask(), operands.Span());
 }
 
+namespace {
+// TLD4.PTP with offsets that are only known at run time. A gather with a separate offset per
+// texel is four gathers, each with its own offset, where texel i comes from the i-th gather (this
+// is what textureGatherOffsets means). The constructor of ImageOperands can only express this
+// when every offset is a compile-time constant.
+[[nodiscard]] bool IsDynamicPtp(const IR::Value& offset, const IR::Value& offset2) {
+    if (offset.IsEmpty() || offset2.IsEmpty() || offset.IsImmediate() || offset2.IsImmediate()) {
+        return false;
+    }
+    IR::Inst* const first{offset.InstRecursive()};
+    IR::Inst* const second{offset2.InstRecursive()};
+    if (first->AreAllArgsImmediates() && second->AreAllArgsImmediates()) {
+        return false;
+    }
+    return first->GetOpcode() == IR::Opcode::CompositeConstructU32x4 &&
+           second->GetOpcode() == IR::Opcode::CompositeConstructU32x4;
+}
+
+[[nodiscard]] std::array<Id, 4> PtpOffsets(EmitContext& ctx, const IR::Value& offset,
+                                           const IR::Value& offset2) {
+    const Id first{ctx.Def(offset)};
+    const Id second{ctx.Def(offset2)};
+    const auto pair{[&](Id vector, u32 index) {
+        const Id x{ctx.OpBitcast(ctx.S32[1], ctx.OpCompositeExtract(ctx.U32[1], vector, index))};
+        const Id y{
+            ctx.OpBitcast(ctx.S32[1], ctx.OpCompositeExtract(ctx.U32[1], vector, index + 1))};
+        return ctx.OpCompositeConstruct(ctx.S32[2], x, y);
+    }};
+    return {pair(first, 0), pair(first, 2), pair(second, 0), pair(second, 2)};
+}
+} // Anonymous namespace
+
 Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords,
                    const IR::Value& offset, const IR::Value& offset2) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const bool is_integer{IsTextureInteger(ctx, info)};
     const Id result_type{is_integer ? ctx.U32[4] : ctx.F32[4]};
+    if (IsDynamicPtp(offset, offset2) &&
+        !inst->GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
+        if (ctx.profile.need_gather_subpixel_offset) {
+            coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
+        }
+        const Id sampled{Texture(ctx, info, index)};
+        const Id component{ctx.Const(info.gather_component)};
+        const Id scalar_type{is_integer ? ctx.U32[1] : ctx.F32[1]};
+        const std::array<Id, 4> offsets{PtpOffsets(ctx, offset, offset2)};
+        std::array<Id, 4> texels{};
+        for (u32 i = 0; i < 4; ++i) {
+            const std::array<Id, 1> operand_ids{offsets[i]};
+            const Id gathered{ctx.OpImageGather(result_type, sampled, coords, component,
+                                                spv::ImageOperandsMask::Offset, operand_ids)};
+            texels[i] = ctx.OpCompositeExtract(scalar_type, gathered, i);
+        }
+        const Id color{Decorate(
+            ctx, inst, ctx.OpCompositeConstruct(result_type, std::span<const Id>{texels}))};
+        return is_integer ? ctx.OpBitcast(ctx.F32[4], color) : color;
+    }
     const ImageOperands operands(ctx, offset, offset2);
     if (ctx.profile.need_gather_subpixel_offset) {
         coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
@@ -649,6 +701,25 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const bool is_integer{IsTextureInteger(ctx, info)};
     const Id result_type{is_integer ? ctx.U32[4] : ctx.F32[4]};
+    if (IsDynamicPtp(offset, offset2) &&
+        !inst->GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
+        if (ctx.profile.need_gather_subpixel_offset) {
+            coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
+        }
+        const Id sampled{Texture(ctx, info, index)};
+        const Id scalar_type{is_integer ? ctx.U32[1] : ctx.F32[1]};
+        const std::array<Id, 4> offsets{PtpOffsets(ctx, offset, offset2)};
+        std::array<Id, 4> texels{};
+        for (u32 i = 0; i < 4; ++i) {
+            const std::array<Id, 1> operand_ids{offsets[i]};
+            const Id gathered{ctx.OpImageDrefGather(result_type, sampled, coords, dref,
+                                                    spv::ImageOperandsMask::Offset, operand_ids)};
+            texels[i] = ctx.OpCompositeExtract(scalar_type, gathered, i);
+        }
+        const Id color{Decorate(
+            ctx, inst, ctx.OpCompositeConstruct(result_type, std::span<const Id>{texels}))};
+        return is_integer ? ctx.OpBitcast(ctx.F32[4], color) : color;
+    }
     const ImageOperands operands(ctx, offset, offset2);
     if (ctx.profile.need_gather_subpixel_offset) {
         coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
