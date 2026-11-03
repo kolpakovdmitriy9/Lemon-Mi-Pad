@@ -115,6 +115,12 @@ public:
         return uses_attribute_handle;
     }
 
+    /// IR attribute those textures read their handle from (Shader::IR::Attribute), or 0 when the
+    /// shader did not say.
+    [[nodiscard]] u32 AttributeHandleSource() const noexcept {
+        return attribute_handle_source;
+    }
+
     /// True when the geometry shader claims its primitive (Shader::Info::uses_gs_scratch): each
     /// draw, and each instance, needs a generation of its own.
     [[nodiscard]] bool UsesGsScratch() const noexcept {
@@ -189,6 +195,7 @@ private:
     size_t num_image_elements{};
     u32 num_textures{};
     u32 attribute_handle{};
+    u32 attribute_handle_source{};
     bool uses_attribute_handle{};
     bool uses_gs_scratch{};
     bool fragment_has_color0_output{};

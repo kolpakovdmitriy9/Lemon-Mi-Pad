@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/frontend/ir/attribute.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
@@ -253,7 +254,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     attribute_handle_pipeline = nullptr;
     attribute_handle_runs.clear();
     if (split_attribute_handles && pipeline->UsesAttributeHandle()) {
-        CollectAttributeHandleRuns(is_indexed);
+        CollectAttributeHandleRuns(is_indexed, pipeline->AttributeHandleSource());
         if (!attribute_handle_runs.empty()) {
             attribute_handle_pipeline = pipeline;
             pipeline->SetAttributeHandle(attribute_handle_runs.front().handle);
@@ -270,7 +271,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     draw_func();
 }
 
-void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed) {
+void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed, u32 source_attribute) {
     using VertexAttribute = Maxwell::VertexAttribute;
     const auto& regs = maxwell3d->regs;
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
@@ -278,15 +279,32 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed) {
     if (total == 0) {
         return;
     }
-    // The handle is an integer attribute; sprite batches repeat it on every vertex of a quad.
+    // Sprite batches repeat the handle on every vertex of a quad. Read it from the attribute the
+    // shader reads it from; only when the shader did not say, guess the first integer attribute
+    // (which in a sprite vertex is often a packed colour instead of the handle).
     const VertexAttribute* source{};
-    for (const auto& attr : regs.vertex_attrib_format) {
-        if (attr.constant || attr.size == VertexAttribute::Size::Invalid) {
-            continue;
+    u32 element_offset{};
+    if (source_attribute != 0) {
+        const auto attribute = static_cast<Shader::IR::Attribute>(source_attribute);
+        if (Shader::IR::IsGeneric(attribute)) {
+            const u32 index = Shader::IR::GenericAttributeIndex(attribute);
+            const auto& attr = regs.vertex_attrib_format[index];
+            if (!attr.constant && attr.size != VertexAttribute::Size::Invalid) {
+                source = &attr;
+                element_offset = Shader::IR::GenericAttributeElement(attribute) * sizeof(u32);
+            }
         }
-        if (attr.type == VertexAttribute::Type::UInt || attr.type == VertexAttribute::Type::SInt) {
-            source = &attr;
-            break;
+    }
+    if (!source) {
+        for (const auto& attr : regs.vertex_attrib_format) {
+            if (attr.constant || attr.size == VertexAttribute::Size::Invalid) {
+                continue;
+            }
+            if (attr.type == VertexAttribute::Type::UInt ||
+                attr.type == VertexAttribute::Type::SInt) {
+                source = &attr;
+                break;
+            }
         }
     }
     const auto& stream = regs.vertex_streams[source ? source->buffer.Value() : 0];
@@ -297,7 +315,7 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed) {
     // Only plain triangle lists are split; anything else keeps the handle of its first vertex.
     const u32 primitive_size =
         draw_state.topology == Maxwell::PrimitiveTopology::Triangles ? 3 : total;
-    const GPUVAddr base_address = stream.Address() + source->offset;
+    const GPUVAddr base_address = stream.Address() + source->offset + element_offset;
     const auto read_handle = [&](u32 position) {
         u32 vertex;
         if (is_indexed) {
@@ -327,6 +345,16 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed) {
         if (covered < total) {
             attribute_handle_runs.back().count += total - covered;
         }
+    }
+    static u32 logged{};
+    if (logged < 24) {
+        ++logged;
+        LOG_INFO(Render_Vulkan,
+                 "Attribute handle: shader attribute {} -> vertex attribute {} (offset {}+{}, stride {}), "
+                 "{} runs, first handle {:#010x}",
+                 source_attribute, static_cast<u32>(source - regs.vertex_attrib_format.data()),
+                 static_cast<u32>(source->offset), element_offset, static_cast<u32>(stream.stride),
+                 attribute_handle_runs.size(), attribute_handle_runs.front().handle);
     }
 }
 

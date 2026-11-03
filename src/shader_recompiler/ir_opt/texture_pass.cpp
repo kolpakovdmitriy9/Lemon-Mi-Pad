@@ -480,16 +480,32 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     };
 }
 
-bool IsAttributeSourcedHandle(const IR::Value& handle) {
+const IR::Inst* AttributeInstOfHandle(const IR::Value& handle) {
     if (handle.IsImmediate()) {
-        return false;
+        return nullptr;
     }
     const IR::Inst* inst{handle.InstRecursive()};
     if (inst->GetOpcode() == IR::Opcode::BitCastU32F32 && !inst->Arg(0).IsImmediate()) {
         inst = inst->Arg(0).InstRecursive();
     }
-    return inst->GetOpcode() == IR::Opcode::GetAttribute ||
-           inst->GetOpcode() == IR::Opcode::GetAttributeU32;
+    if (inst->GetOpcode() == IR::Opcode::GetAttribute ||
+        inst->GetOpcode() == IR::Opcode::GetAttributeU32) {
+        return inst;
+    }
+    return nullptr;
+}
+
+bool IsAttributeSourcedHandle(const IR::Value& handle) {
+    return AttributeInstOfHandle(handle) != nullptr;
+}
+
+/// The vertex attribute a texture handle is read from, when it is known at translation time.
+std::optional<IR::Attribute> AttributeSourcedHandle(const IR::Value& handle) {
+    const IR::Inst* const inst{AttributeInstOfHandle(handle)};
+    if (inst && inst->Arg(0).IsImmediate()) {
+        return inst->Arg(0).Attribute();
+    }
+    return std::nullopt;
 }
 
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const HostTranslateInfo& host_info) {
@@ -504,9 +520,12 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             // The handle travels with the vertices (sprite batches pick the texture per quad), so
             // there is no constant buffer to read it from. The host binds the handle of each run
             // of vertices that share one.
+            // The offset carries the IR attribute the handle is read from, so the host reads the
+            // right vertex component instead of guessing.
+            const std::optional<IR::Attribute> source{AttributeSourcedHandle(inst.Arg(0))};
             addr = ConstBufferAddr{
                 .index = ATTRIBUTE_HANDLE_CBUF_INDEX,
-                .offset = 0,
+                .offset = source ? static_cast<u32>(*source) : 0,
                 .shift_left = 0,
                 .secondary_index = 0,
                 .secondary_offset = 0,

@@ -168,7 +168,7 @@ private:
     };
 
     /// Splits the current draw wherever the texture handle carried in the vertex data changes.
-    void CollectAttributeHandleRuns(bool is_indexed);
+    void CollectAttributeHandleRuns(bool is_indexed, u32 source_attribute);
 
     std::vector<AttributeHandleRun> attribute_handle_runs;
     GraphicsPipeline* attribute_handle_pipeline{};

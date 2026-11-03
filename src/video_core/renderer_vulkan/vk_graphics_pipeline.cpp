@@ -277,7 +277,13 @@ GraphicsPipeline::GraphicsPipeline(
         num_image_elements += Shader::NumDescriptors(info->texture_descriptors);
         num_image_elements += Shader::NumDescriptors(info->image_descriptors);
         for (const auto& desc : info->texture_descriptors) {
-            uses_attribute_handle |= desc.cbuf_index == Shader::ATTRIBUTE_HANDLE_CBUF_INDEX;
+            if (desc.cbuf_index != Shader::ATTRIBUTE_HANDLE_CBUF_INDEX) {
+                continue;
+            }
+            uses_attribute_handle = true;
+            if (attribute_handle_source == 0) {
+                attribute_handle_source = desc.cbuf_offset;
+            }
         }
         uses_gs_scratch |= info->uses_gs_scratch;
         num_descriptor_entries += NumDescriptorEntries(*info);

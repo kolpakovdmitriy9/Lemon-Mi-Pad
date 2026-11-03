@@ -64,8 +64,9 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-// Bumped to 19 so shaders translated before the texture index and PTP gather fixes are discarded.
-constexpr u32 CACHE_VERSION = 19;
+// Bumped to 20 so shaders translated before the texture index, PTP gather and attribute handle fixes
+// are discarded.
+constexpr u32 CACHE_VERSION = 20;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
