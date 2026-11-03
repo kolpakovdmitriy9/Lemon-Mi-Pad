@@ -432,17 +432,32 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             for (u32 index = 0; index < desc.count; ++index) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
-                if (const u32 tic_limit{maxwell3d->regs.tex_header.limit}; handle.first > tic_limit) {
-                    static u32 logged{};
-                    if (logged < 64) {
-                        ++logged;
-                        LOG_WARNING(Render_Vulkan,
-                                    "Draw-time texture index out of range: stage {} cbuf {}+{:#x} "
-                                    "element {} tic {} limit {} attribute_handle={}",
-                                    stage, static_cast<u32>(desc.cbuf_index),
-                                    static_cast<u32>(desc.cbuf_offset), index, handle.first,
-                                    tic_limit,
-                                    desc.cbuf_index == Shader::ATTRIBUTE_HANDLE_CBUF_INDEX);
+                {
+                    // Probe: a handle of 0 or past the table binds a null image view. Report where
+                    // it was read from and whether the GPU has written that memory.
+                    const u32 tic_limit{maxwell3d->regs.tex_header.limit};
+                    const bool is_attribute{desc.cbuf_index ==
+                                            Shader::ATTRIBUTE_HANDLE_CBUF_INDEX};
+                    if (!is_attribute && (handle.first == 0 || handle.first > tic_limit)) {
+                        static u32 logged_zero{};
+                        static u32 logged_range{};
+                        u32& counter{handle.first == 0 ? logged_zero : logged_range};
+                        if (counter < 48) {
+                            ++counter;
+                            const GPUVAddr cbuf_addr{cbufs[desc.cbuf_index].address +
+                                                     desc.cbuf_offset + (index << desc.size_shift)};
+                            const auto cpu_addr{gpu_memory->GpuToCpuAddress(cbuf_addr)};
+                            const bool gpu_modified{
+                                cpu_addr && buffer_cache.IsRegionGpuModified(*cpu_addr, sizeof(u32))};
+                            LOG_WARNING(Render_Vulkan,
+                                        "Draw-time texture handle {}: stage {} cbuf {}+{:#x} "
+                                        "element {} tic {} limit {} gpu_addr={:#x} "
+                                        "gpu_modified={}",
+                                        handle.first == 0 ? "zero" : "out of range", stage,
+                                        static_cast<u32>(desc.cbuf_index),
+                                        static_cast<u32>(desc.cbuf_offset), index, handle.first,
+                                        tic_limit, cbuf_addr, gpu_modified);
+                        }
                     }
                 }
 
