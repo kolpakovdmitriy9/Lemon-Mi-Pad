@@ -284,7 +284,12 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed, u32 source_at
     // (which in a sprite vertex is often a packed colour instead of the handle).
     const VertexAttribute* source{};
     u32 element_offset{};
-    if (source_attribute != 0) {
+    // The texture is usually sampled in the fragment shader, where "generic N" is an interpolant
+    // written by the vertex shader, not vertex input N. Mapping it to a vertex attribute by number
+    // read the wrong data (it hid the player markers and control hints), so it stays off until
+    // the interpolant is traced back to its vertex input.
+    constexpr bool use_shader_attribute = false;
+    if (use_shader_attribute && source_attribute != 0) {
         const auto attribute = static_cast<Shader::IR::Attribute>(source_attribute);
         if (Shader::IR::IsGeneric(attribute)) {
             const u32 index = Shader::IR::GenericAttributeIndex(attribute);
@@ -349,12 +354,41 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed, u32 source_at
     static u32 logged{};
     if (logged < 24) {
         ++logged;
+        std::string layout;
+        const u32 first_vertex = [&] {
+            if (!is_indexed) {
+                return draw_state.vertex_buffer.first;
+            }
+            const auto& index_buffer = draw_state.index_buffer;
+            u32 index{};
+            gpu_memory->ReadBlockUnsafe(index_buffer.IndexStart(), &index,
+                                        index_buffer.FormatSizeInBytes());
+            return static_cast<u32>(draw_state.base_index + index);
+        }();
+        for (u32 i = 0; i < regs.vertex_attrib_format.size(); ++i) {
+            const auto& attr = regs.vertex_attrib_format[i];
+            if (attr.constant || attr.size == VertexAttribute::Size::Invalid) {
+                continue;
+            }
+            const auto& attr_stream = regs.vertex_streams[attr.buffer.Value()];
+            u32 word{};
+            if (attr_stream.IsEnabled()) {
+                word = gpu_memory->Read<u32>(attr_stream.Address() + attr.offset +
+                                             static_cast<GPUVAddr>(first_vertex) *
+                                                 attr_stream.stride);
+            }
+            layout += fmt::format(" [{}: type={} size={} buf={} off={} w0={:#010x}]", i,
+                                  static_cast<u32>(attr.type.Value()),
+                                  static_cast<u32>(attr.size.Value()),
+                                  static_cast<u32>(attr.buffer.Value()),
+                                  static_cast<u32>(attr.offset.Value()), word);
+        }
         LOG_INFO(Render_Vulkan,
-                 "Attribute handle: shader attribute {} -> vertex attribute {} (offset {}+{}, stride {}), "
-                 "{} runs, first handle {:#010x}",
+                 "Attribute handle: shader attribute {}, chosen vertex attribute {} (off {}+{}, "
+                 "stride {}), {} runs, first handle {:#010x}, layout:{}",
                  source_attribute, static_cast<u32>(source - regs.vertex_attrib_format.data()),
                  static_cast<u32>(source->offset), element_offset, static_cast<u32>(stream.stride),
-                 attribute_handle_runs.size(), attribute_handle_runs.front().handle);
+                 attribute_handle_runs.size(), attribute_handle_runs.front().handle, layout);
     }
 }
 
