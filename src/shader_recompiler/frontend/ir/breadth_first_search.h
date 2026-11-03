@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <type_traits>
 #include <queue>
@@ -13,9 +14,10 @@
 
 namespace Shader::IR {
 
-template <typename Pred>
-auto BreadthFirstSearch(const Value& value, Pred&& pred)
+template <typename Pred, typename Resolve = std::identity>
+auto BreadthFirstSearch(Value value, Pred&& pred, Resolve&& resolve = {})
     -> std::invoke_result_t<Pred, const Inst*> {
+    value = resolve(value);
     if (value.IsImmediate()) {
         // Nothing to do with immediates
         return std::nullopt;
@@ -36,7 +38,7 @@ auto BreadthFirstSearch(const Value& value, Pred&& pred)
         }
         // Visit the right most arguments first
         for (size_t arg = inst->NumArgs(); arg--;) {
-            const Value arg_value{inst->Arg(arg)};
+            const Value arg_value{resolve(inst->Arg(arg))};
             if (arg_value.IsImmediate()) {
                 continue;
             }

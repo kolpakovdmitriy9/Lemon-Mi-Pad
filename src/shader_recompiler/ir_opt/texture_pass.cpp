@@ -37,6 +37,76 @@ struct TextureInst {
 
 using TextureInstVector = boost::container::small_vector<TextureInst, 24>;
 
+// Ported from Eden (0689f73147, "resolve conditional Phi inputs when tracking bindless texture
+// handles"). A texture handle chosen by a condition is a Phi of the two candidate handles. The
+// texture instruction sits in one of the branches, so the arm of the same branch is its handle;
+// without this the tracker follows an arbitrary arm and the sample reads another texture.
+const IR::Block* ConditionalHeader(const IR::Block* body) {
+    const auto predecessors{body->ImmPredecessors()};
+    const auto successors{body->ImmSuccessors()};
+    if (predecessors.size() != 1 || successors.size() != 1) {
+        return nullptr;
+    }
+    const IR::Block* const header{predecessors[0]};
+    const auto targets{header->ImmSuccessors()};
+    if (targets.size() != 2 || targets[0] != body || targets[1] != successors[0] ||
+        targets[1]->ImmPredecessors().size() != 2 || header->empty() ||
+        header->back().GetOpcode() != IR::Opcode::ConditionRef) {
+        return nullptr;
+    }
+    return header;
+}
+
+std::pair<IR::Value, bool> Condition(IR::Value value) {
+    bool negated{};
+    while (const IR::Inst* inst = value.TryInstRecursive()) {
+        if (inst->GetOpcode() == IR::Opcode::LogicalNot) {
+            negated = !negated;
+        } else if (inst->GetOpcode() != IR::Opcode::ConditionRef) {
+            break;
+        }
+        value = inst->Arg(0);
+    }
+    return {value.Resolve(), negated};
+}
+
+IR::Value ResolveConditionalPhi(IR::Value value, const IR::Block* block) {
+    if (!block || !value.Resolve().IsPhi() || !(block = ConditionalHeader(block))) {
+        return value;
+    }
+    const auto [condition, negated]{Condition(block->back().Arg(0))};
+    boost::container::small_vector<const IR::Block*, 16> visited;
+    while (value.Resolve().IsPhi() && std::ranges::find(visited, block) == visited.end()) {
+        visited.push_back(block);
+        const IR::Inst* const phi{value.InstRecursive()};
+        const auto predecessors{block->ImmPredecessors()};
+        if (predecessors.size() == 1) {
+            block = predecessors[0];
+            continue;
+        }
+        if (predecessors.size() != 2 || phi->NumArgs() != 2) {
+            break;
+        }
+        const IR::Block* body{predecessors[0]};
+        const IR::Block* header{ConditionalHeader(body)};
+        if (header != predecessors[1]) {
+            body = predecessors[1];
+            header = ConditionalHeader(body);
+            if (header != predecessors[0]) {
+                break;
+            }
+        }
+        const auto [other_condition, other_negated]{Condition(header->back().Arg(0))};
+        if (condition == other_condition &&
+            (phi->PhiBlock(0) == header || phi->PhiBlock(0) == body)) {
+            const IR::Block* const incoming{negated == other_negated ? body : header};
+            value = phi->Arg(phi->PhiBlock(0) == incoming ? 0 : 1);
+        }
+        block = header;
+    }
+    return value;
+}
+
 constexpr u32 DESCRIPTOR_SIZE = 8;
 constexpr u32 DESCRIPTOR_SIZE_SHIFT = u32(std::countr_zero(DESCRIPTOR_SIZE));
 constexpr u32 DESCRIPTOR_MAX_COUNT = 1024;
@@ -318,18 +388,18 @@ static inline bool IsTexturePixelFormatIntegerCached(Environment& env,
 }
 
 
-std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info);
-static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Environment& env, const HostTranslateInfo& host_info) {
-    if (const IR::Inst* key = v.InstRecursive()) {
+std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block);
+static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
+    if (const IR::Inst* key = v.TryInstRecursive()) {
         if (auto it = env.track_cache.find(key); it != env.track_cache.end()) return it->second;
-        auto found = Track(v, env, host_info);
+        auto found = Track(v, env, host_info, block);
         if (found) env.track_cache.emplace(key, *found);
         return found;
     }
-    return Track(v, env, host_info);
+    return Track(v, env, host_info, block);
 }
 
-std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info);
+std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block);
 
 /// Prints an instruction tree (opcodes and immediates), to see what a handle is computed from.
 std::string DescribeValue(const IR::Value& value, int depth) {
@@ -355,8 +425,10 @@ std::string DescribeValue(const IR::Value& value, int depth) {
 /// address of the read, they are not where the value comes from. Descending into them reported
 /// an unrelated constant (an index or a float) as the handle when the read itself could not be
 /// tracked.
-std::optional<ConstBufferAddr> SearchWithoutAddressOperands(const IR::Value& value, Environment& env,
-                                                           const HostTranslateInfo& host_info) {
+std::optional<ConstBufferAddr> SearchWithoutAddressOperands(IR::Value value, Environment& env,
+                                                           const HostTranslateInfo& host_info,
+                                                           const IR::Block* block) {
+    value = ResolveConditionalPhi(value, block);
     if (value.IsImmediate()) {
         return std::nullopt;
     }
@@ -366,7 +438,7 @@ std::optional<ConstBufferAddr> SearchWithoutAddressOperands(const IR::Value& val
     while (!queue.empty()) {
         const IR::Inst* const inst{queue.front()};
         queue.pop();
-        if (const auto result{TryGetConstBuffer(inst, env, host_info)}) {
+        if (const auto result{TryGetConstBuffer(inst, env, host_info, block)}) {
             return result;
         }
         if (inst->GetOpcode() == IR::Opcode::GetCbufU32 ||
@@ -374,7 +446,7 @@ std::optional<ConstBufferAddr> SearchWithoutAddressOperands(const IR::Value& val
             continue;
         }
         for (size_t arg = inst->NumArgs(); arg--;) {
-            const IR::Value arg_value{inst->Arg(arg)};
+            const IR::Value arg_value{ResolveConditionalPhi(inst->Arg(arg), block)};
             if (arg_value.IsImmediate()) {
                 continue;
             }
@@ -388,14 +460,17 @@ std::optional<ConstBufferAddr> SearchWithoutAddressOperands(const IR::Value& val
     return std::nullopt;
 }
 
-std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info) {
-    if (auto strict{SearchWithoutAddressOperands(value, env, host_info)}) {
+std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
+    if (auto strict{SearchWithoutAddressOperands(value, env, host_info, block)}) {
         return strict;
     }
     // Previous behaviour, kept so that no shader that compiled before stops compiling.
-    auto loose{IR::BreadthFirstSearch(value, [&env, &host_info](const IR::Inst* inst) {
-        return TryGetConstBuffer(inst, env, host_info);
-    })};
+    auto loose{IR::BreadthFirstSearch(
+        value,
+        [&env, &host_info, block](const IR::Inst* inst) {
+            return TryGetConstBuffer(inst, env, host_info, block);
+        },
+        [block](IR::Value operand) { return ResolveConditionalPhi(operand, block); })};
     if (loose) {
         static u32 logged{};
         if (logged < 24) {
@@ -430,13 +505,13 @@ std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
     return ReadCbufCached(env, index_number, offset_number);
 }
 
-std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info) {
+std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
     switch (inst->GetOpcode()) {
     default:
         return std::nullopt;
     case IR::Opcode::BitwiseOr32: {
-        std::optional lhs{TrackCached(inst->Arg(0), env, host_info)};
-        std::optional rhs{TrackCached(inst->Arg(1), env, host_info)};
+        std::optional lhs{TrackCached(inst->Arg(0), env, host_info, block)};
+        std::optional rhs{TrackCached(inst->Arg(1), env, host_info, block)};
         if (!lhs || !rhs) {
             return std::nullopt;
         }
@@ -466,7 +541,7 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         if (!shift.IsImmediate()) {
             return std::nullopt;
         }
-        std::optional lhs{TrackCached(inst->Arg(0), env, host_info)};
+        std::optional lhs{TrackCached(inst->Arg(0), env, host_info, block)};
         if (lhs) {
             lhs->shift_left = shift.U32();
         }
@@ -494,7 +569,7 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
                 return std::nullopt;
             } while (false);
         }
-        std::optional lhs{TrackCached(op1, env, host_info)};
+        std::optional lhs{TrackCached(op1, env, host_info, block)};
         if (lhs) {
             lhs->shift_left = static_cast<u32>(std::countr_zero(op2.U32()));
         }
@@ -588,7 +663,7 @@ std::optional<IR::Attribute> AttributeSourcedHandle(const IR::Value& handle) {
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const HostTranslateInfo& host_info) {
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
-        const std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info)};
+        const std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info, block)};
 
         if (track_addr) {
             addr = *track_addr;
@@ -809,6 +884,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
     env.track_cache.clear();
     TextureInstVector to_replace;
     for (IR::Block* const block : program.post_order_blocks) {
+        env.track_cache.clear();
         for (IR::Inst& inst : block->Instructions()) {
             if (!IsTextureInstruction(inst)) {
                 continue;
