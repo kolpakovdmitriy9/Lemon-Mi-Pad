@@ -299,7 +299,22 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                       "tic_addr={:#x} shader={:#x}",
                       raw, via_header_index, handle.first, tic_limit, tic_addr, program_base);
         }
-        return Tegra::Texture::TICEntry{};
+        // An all-zero descriptor would mean a 1D texture of format 0. These handles come from
+        // data that is not a texture index (floats, -1), so the texture the shader really uses
+        // is bound at draw time; assume the common case of a plain 2D RGBA8 texture.
+        Tegra::Texture::TICEntry fallback{};
+        fallback.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
+        fallback.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        fallback.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        fallback.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        fallback.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        fallback.x_source.Assign(Tegra::Texture::SwizzleSource::R);
+        fallback.y_source.Assign(Tegra::Texture::SwizzleSource::G);
+        fallback.z_source.Assign(Tegra::Texture::SwizzleSource::B);
+        fallback.w_source.Assign(Tegra::Texture::SwizzleSource::A);
+        fallback.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
+        fallback.normalized_coords.Assign(1);
+        return fallback;
     }
     const GPUVAddr descriptor_addr{tic_addr + handle.first * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
