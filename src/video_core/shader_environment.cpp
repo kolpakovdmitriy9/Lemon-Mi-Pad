@@ -288,11 +288,18 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                                                              bool via_header_index, u32 raw) {
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     if (handle.first > tic_limit) {
-        // Diagnostic: the guest indexed past the TIC table limit. Log where the index came from.
-        LOG_ERROR(Shader,
-                  "TIC index out of range: raw={:#010x} via_header={} tic_id={} tic_limit={} "
-                  "tic_addr={:#x}",
-                  raw, via_header_index, handle.first, tic_limit, tic_addr);
+        // The guest indexed past the TIC table. Hardware does not read beyond the table, so do
+        // not read the memory behind it either: return an empty descriptor. Log the first few
+        // occurrences per shader to find which handle source produced the bad index.
+        static u32 logged{};
+        if (logged < 64) {
+            ++logged;
+            LOG_ERROR(Shader,
+                      "TIC index out of range: raw={:#010x} via_header={} tic_id={} tic_limit={} "
+                      "tic_addr={:#x} shader={:#x}",
+                      raw, via_header_index, handle.first, tic_limit, tic_addr, program_base);
+        }
+        return Tegra::Texture::TICEntry{};
     }
     const GPUVAddr descriptor_addr{tic_addr + handle.first * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
