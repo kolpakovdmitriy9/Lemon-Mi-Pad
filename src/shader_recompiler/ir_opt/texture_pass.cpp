@@ -632,19 +632,33 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     };
 }
 
-const IR::Inst* AttributeInstOfHandle(const IR::Value& handle) {
+/// The GetAttribute behind a handle expression: the attribute itself, a bit cast of it, or one
+/// wrapped by a mask, shift or bit-field extract (the handle word of a sprite vertex is
+/// `attribute & 0xFFFFF` when the mask is itself loaded from a constant buffer).
+const IR::Inst* AttributeInstOfHandle(const IR::Value& handle, int depth = 4) {
     if (handle.IsImmediate()) {
         return nullptr;
     }
-    const IR::Inst* inst{handle.InstRecursive()};
-    if (inst->GetOpcode() == IR::Opcode::BitCastU32F32 && !inst->Arg(0).IsImmediate()) {
-        inst = inst->Arg(0).InstRecursive();
-    }
-    if (inst->GetOpcode() == IR::Opcode::GetAttribute ||
-        inst->GetOpcode() == IR::Opcode::GetAttributeU32) {
+    const IR::Inst* const inst{handle.InstRecursive()};
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetAttribute:
+    case IR::Opcode::GetAttributeU32:
         return inst;
+    case IR::Opcode::BitCastU32F32:
+    case IR::Opcode::ShiftRightLogical32:
+    case IR::Opcode::BitFieldUExtract:
+        return depth > 0 ? AttributeInstOfHandle(inst->Arg(0), depth - 1) : nullptr;
+    case IR::Opcode::BitwiseAnd32:
+        if (depth <= 0) {
+            return nullptr;
+        }
+        if (const IR::Inst* const lhs{AttributeInstOfHandle(inst->Arg(0), depth - 1)}) {
+            return lhs;
+        }
+        return AttributeInstOfHandle(inst->Arg(1), depth - 1);
+    default:
+        return nullptr;
     }
-    return nullptr;
 }
 
 bool IsAttributeSourcedHandle(const IR::Value& handle) {
@@ -663,12 +677,27 @@ std::optional<IR::Attribute> AttributeSourcedHandle(const IR::Value& handle) {
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const HostTranslateInfo& host_info) {
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
-        const std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info, block)};
+        std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info, block)};
+        const bool attribute_sourced{host_info.support_attribute_texture_handle &&
+                                     IsAttributeSourcedHandle(inst.Arg(0))};
+        if (track_addr && attribute_sourced) {
+            // The tracker found a constant buffer word inside the expression (the mask of
+            // `attribute & mask`, FIFA 23: cbuf 2 + 0x58 = 0xFFFFF), but the handle is the
+            // vertex attribute: using the word bound a null texture to every sprite.
+            static u32 logged{};
+            if (logged < 16) {
+                ++logged;
+                LOG_WARNING(Shader,
+                            "Attribute handle preferred over tracked cbuf {} + {:#x}; handle = {}",
+                            track_addr->index, track_addr->offset,
+                            DescribeValue(inst.Arg(0), 6));
+            }
+            track_addr.reset();
+        }
 
         if (track_addr) {
             addr = *track_addr;
-        } else if (host_info.support_attribute_texture_handle &&
-                   IsAttributeSourcedHandle(inst.Arg(0))) {
+        } else if (attribute_sourced) {
             // The handle travels with the vertices (sprite batches pick the texture per quad), so
             // there is no constant buffer to read it from. The host binds the handle of each run
             // of vertices that share one.
