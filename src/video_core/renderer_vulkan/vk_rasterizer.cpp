@@ -318,8 +318,14 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed, u32 source_at
         return;
     }
     // Only plain triangle lists are split; anything else keeps the handle of its first vertex.
-    const u32 primitive_size =
-        draw_state.topology == Maxwell::PrimitiveTopology::Triangles ? 3 : total;
+    // Triangle lists and non-indexed quad lists (the usual 2D sprite batch) are split per
+    // primitive; anything else keeps the handle of its first vertex.
+    u32 primitive_size = total;
+    if (draw_state.topology == Maxwell::PrimitiveTopology::Triangles) {
+        primitive_size = 3;
+    } else if (draw_state.topology == Maxwell::PrimitiveTopology::Quads && !is_indexed) {
+        primitive_size = 4;
+    }
     const GPUVAddr base_address = stream.Address() + source->offset + element_offset;
     const auto read_handle = [&](u32 position) {
         u32 vertex;
@@ -384,9 +390,10 @@ void RasterizerVulkan::CollectAttributeHandleRuns(bool is_indexed, u32 source_at
                                   static_cast<u32>(attr.offset.Value()), word);
         }
         LOG_INFO(Render_Vulkan,
-                 "Attribute handle: shader attribute {}, chosen vertex attribute {} (off {}+{}, "
-                 "stride {}), {} runs, first handle {:#010x}, layout:{}",
-                 source_attribute, static_cast<u32>(source - regs.vertex_attrib_format.data()),
+                 "Attribute handle: topology {} total {}, shader attribute {}, chosen vertex "
+                 "attribute {} (off {}+{}, stride {}), {} runs, first handle {:#010x}, layout:{}",
+                 static_cast<u32>(draw_state.topology), total, source_attribute,
+                 static_cast<u32>(source - regs.vertex_attrib_format.data()),
                  static_cast<u32>(source->offset), element_offset, static_cast<u32>(stream.stride),
                  attribute_handle_runs.size(), attribute_handle_runs.front().handle, layout);
     }
@@ -468,7 +475,12 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                 }
                 DrawParams run_params = draw_params;
                 run_params.num_vertices = run.count;
-                if (is_indexed) {
+                if (draw_state.topology == Maxwell::PrimitiveTopology::Quads && !is_indexed) {
+                    // A quad draw runs on the generated quad index buffer (6 indices per quad,
+                    // the first vertex is already part of the indices).
+                    run_params.num_vertices = run.count / 4 * 6;
+                    run_params.first_index += run.first / 4 * 6;
+                } else if (is_indexed) {
                     run_params.first_index += run.first;
                 } else {
                     run_params.base_vertex += run.first;
@@ -680,7 +692,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     const VkExtent2D render_area = framebuffer->RenderArea();
 
-    constexpr bool ENABLE_DEFERRED_CLEAR = true;
+    // Off while chasing the FIFA kit textures: a deferred clear clears every layer of the view.
+    constexpr bool ENABLE_DEFERRED_CLEAR = false;
     const bool color_full_channels = regs.clear_surface.R && regs.clear_surface.G &&
                                      regs.clear_surface.B && regs.clear_surface.A;
     const bool stencil_partial = use_stencil && framebuffer->HasAspectStencilBit() &&

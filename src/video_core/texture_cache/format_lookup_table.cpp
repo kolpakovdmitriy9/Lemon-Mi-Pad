@@ -44,6 +44,19 @@ constexpr u32 Hash(TextureFormat format, ComponentType component, bool is_srgb =
 PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, ComponentType green,
                                        ComponentType blue, ComponentType alpha,
                                        bool is_srgb) noexcept {
+    const auto drop_force_fp16 = [](ComponentType type) {
+        if (type == ComponentType::UNORM_FORCE_FP16) {
+            return ComponentType::UNORM;
+        }
+        if (type == ComponentType::SNORM_FORCE_FP16) {
+            return ComponentType::SNORM;
+        }
+        return type;
+    };
+    red = drop_force_fp16(red);
+    green = drop_force_fp16(green);
+    blue = drop_force_fp16(blue);
+    alpha = drop_force_fp16(alpha);
     switch (Hash(format, red, green, blue, alpha, is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
         return PixelFormat::A8B8G8R8_UNORM;

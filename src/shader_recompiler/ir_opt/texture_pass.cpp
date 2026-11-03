@@ -774,6 +774,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         const auto& cbuf{texture_inst.cbuf};
         auto flags{inst->Flags<IR::TextureInstInfo>()};
         bool is_multisample{false};
+        bool patch_rect{false};
         switch (inst->GetOpcode()) {
         case IR::Opcode::ImageQueryDimensions:
             flags.type.Assign(ReadTextureTypeCached(env, cbuf));
@@ -784,7 +785,9 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 break;
             }
             if (ReadTextureTypeCached(env, cbuf) == TextureType::Color2DRect) {
-                PatchImageSampleImplicitLod(*texture_inst.block, *texture_inst.inst);
+                // Patched below, once the descriptor index is part of the instruction's flags
+                // (the size query used to read descriptor 0 whatever texture this was).
+                patch_rect = true;
             }
             break;
         case IR::Opcode::ImageFetch:
@@ -894,6 +897,9 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         }
         flags.descriptor_index.Assign(index);
         inst->SetFlags(flags);
+        if (patch_rect) {
+            PatchImageSampleImplicitLod(*texture_inst.block, *texture_inst.inst);
+        }
 
         if (count > 1) {
             const auto insert_point{IR::Block::InstructionList::s_iterator_to(*inst)};

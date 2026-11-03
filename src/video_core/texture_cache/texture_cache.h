@@ -1786,7 +1786,9 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     for (const auto& copy_object : join_copies_to_do) {
         Image& overlap = slot_images[copy_object.id];
         if (copy_object.is_alias) {
-            if (!overlap.IsSafeGpuCopy()) {
+            // Copy whatever the GPU drew, even when the image was also flagged CpuModified: that
+            // flag is set for every image on a page whose memory the CPU touched.
+            if (False(overlap.flags & ImageFlagBits::GpuModified)) {
                 continue;
             }
             if (overlap.info.num_samples != new_image.info.num_samples) {
@@ -2526,7 +2528,11 @@ void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     const bool newly_modified = False(image.flags & ImageFlagBits::GpuModified);
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
-    if (newly_modified) {
+    // Disabled while chasing the FIFA kit textures: the fault this causes on any read of a page
+    // marks every image on that page CpuModified, and a freshly rendered texture is then replaced
+    // by what guest memory holds (nothing).
+    constexpr bool protect_gpu_written = false;
+    if (protect_gpu_written && newly_modified) {
         // Guest memory doesn't hold what the GPU draws here. Make the CPU fault on reading it, so
         // the fault handler copies the GPU's contents back first (GPU::InvalidateRegion).
         device_memory.ProtectGpuWritten(image.cpu_addr, image.guest_size_bytes);
