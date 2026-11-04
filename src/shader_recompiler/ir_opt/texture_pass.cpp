@@ -498,10 +498,17 @@ std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
         return std::nullopt;
     }
     const auto index_number = index.U32();
-    if (index_number != 1) {
-        return std::nullopt;
-    }
     const auto offset_number = offset.U32();
+    if (index_number != 1) {
+        // A texture-index mask can live in any constant buffer (FIFA 23 menu: `handle & cbuf 2 +
+        // 0x58`, where that word is 0xFFFFF). Only accept the masks an index can be cut with, so a
+        // handle read from another buffer is not mistaken for one.
+        const u32 value{ReadCbufCached(env, index_number, offset_number)};
+        if (value != 0xFFFFF && value != 0xFFF00000) {
+            return std::nullopt;
+        }
+        return value;
+    }
     return ReadCbufCached(env, index_number, offset_number);
 }
 
