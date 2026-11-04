@@ -432,35 +432,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             for (u32 index = 0; index < desc.count; ++index) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
-                {
-                    // Probe: a handle of 0 or past the table binds a null image view. Report where
-                    // it was read from and whether the GPU has written that memory.
-                    const u32 tic_limit{maxwell3d->regs.tex_header.limit};
-                    const bool is_attribute{desc.cbuf_index ==
-                                            Shader::ATTRIBUTE_HANDLE_CBUF_INDEX};
-                    if (!is_attribute && (handle.first == 0 || handle.first > tic_limit)) {
-                        static u32 logged_zero{};
-                        static u32 logged_range{};
-                        u32& counter{handle.first == 0 ? logged_zero : logged_range};
-                        if (counter < 48) {
-                            ++counter;
-                            const GPUVAddr cbuf_addr{cbufs[desc.cbuf_index].address +
-                                                     desc.cbuf_offset + (index << desc.size_shift)};
-                            const auto cpu_addr{gpu_memory->GpuToCpuAddress(cbuf_addr)};
-                            const bool gpu_modified{
-                                cpu_addr && buffer_cache.IsRegionGpuModified(*cpu_addr, sizeof(u32))};
-                            LOG_WARNING(Render_Vulkan,
-                                        "Draw-time texture handle {}: stage {} cbuf {}+{:#x} "
-                                        "element {} tic {} limit {} gpu_addr={:#x} "
-                                        "gpu_modified={}",
-                                        handle.first == 0 ? "zero" : "out of range", stage,
-                                        static_cast<u32>(desc.cbuf_index),
-                                        static_cast<u32>(desc.cbuf_offset), index, handle.first,
-                                        tic_limit, cbuf_addr, gpu_modified);
-                        }
-                    }
-                }
-
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
             }
@@ -491,20 +462,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
-    {
-        static u32 logged_null{};
-        if (logged_null < 64) {
-            for (const auto& bound : views) {
-                if (bound.id == VideoCommon::NULL_IMAGE_VIEW_ID && logged_null < 64) {
-                    ++logged_null;
-                    LOG_WARNING(Render_Vulkan,
-                                "Null image view bound: tic {} limit {} attribute_handle={}",
-                                bound.index, maxwell3d->regs.tex_header.limit, attribute_handle);
-                }
-            }
-        }
-    }
-
     VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
     const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
         size_t index{};

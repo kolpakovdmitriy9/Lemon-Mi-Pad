@@ -291,14 +291,6 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         // The guest indexed past the TIC table. Hardware does not read beyond the table, so do
         // not read the memory behind it either: return an empty descriptor. Log the first few
         // occurrences per shader to find which handle source produced the bad index.
-        static u32 logged{};
-        if (logged < 64) {
-            ++logged;
-            LOG_ERROR(Shader,
-                      "TIC index out of range: raw={:#010x} via_header={} tic_id={} tic_limit={} "
-                      "tic_addr={:#x} shader={:#x}",
-                      raw, via_header_index, handle.first, tic_limit, tic_addr, program_base);
-        }
         // An all-zero descriptor would mean a 1D texture of format 0. These handles come from
         // data that is not a texture index (floats, -1), so the texture the shader really uses
         // is bound at draw time; assume the common case of a plain 2D RGBA8 texture.

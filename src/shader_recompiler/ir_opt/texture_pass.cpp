@@ -401,26 +401,6 @@ static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Env
 
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block);
 
-/// Prints an instruction tree (opcodes and immediates), to see what a handle is computed from.
-std::string DescribeValue(const IR::Value& value, int depth) {
-    if (value.IsImmediate()) {
-        return value.Type() == IR::Type::U32 ? fmt::format("{:#x}", value.U32()) : "imm";
-    }
-    const IR::Inst* const inst{value.InstRecursive()};
-    std::string out{IR::NameOf(inst->GetOpcode())};
-    out += '(';
-    if (depth <= 0) {
-        return out + "..)";
-    }
-    for (size_t i = 0; i < inst->NumArgs(); ++i) {
-        if (i != 0) {
-            out += ", ";
-        }
-        out += DescribeValue(inst->Arg(i), depth - 1);
-    }
-    return out + ')';
-}
-
 /// Like IR::BreadthFirstSearch, but a constant buffer read is a source: its operands compute the
 /// address of the read, they are not where the value comes from. Descending into them reported
 /// an unrelated constant (an index or a float) as the handle when the read itself could not be
@@ -471,16 +451,6 @@ std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, c
             return TryGetConstBuffer(inst, env, host_info, block);
         },
         [block](IR::Value operand) { return ResolveConditionalPhi(operand, block); })};
-    if (loose) {
-        static u32 logged{};
-        if (logged < 24) {
-            ++logged;
-            LOG_WARNING(Shader,
-                        "Texture handle tracking used an address operand: cbuf {} + {:#x}; handle "
-                        "= {}",
-                        loose->index, loose->offset, DescribeValue(value, 7));
-        }
-    }
     return loose;
 }
 
@@ -691,14 +661,6 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             // The tracker found a constant buffer word inside the expression (the mask of
             // `attribute & mask`, FIFA 23: cbuf 2 + 0x58 = 0xFFFFF), but the handle is the
             // vertex attribute: using the word bound a null texture to every sprite.
-            static u32 logged{};
-            if (logged < 16) {
-                ++logged;
-                LOG_WARNING(Shader,
-                            "Attribute handle preferred over tracked cbuf {} + {:#x}; handle = {}",
-                            track_addr->index, track_addr->offset,
-                            DescribeValue(inst.Arg(0), 6));
-            }
             track_addr.reset();
         }
 

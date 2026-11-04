@@ -1195,20 +1195,6 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
     image.flags &= ~ImageFlagBits::CpuModified;
 
-    if (True(image.flags & ImageFlagBits::GpuModified)) {
-        // The GPU drew this image and guest memory is about to overwrite it.
-        static u32 logged{};
-        if (logged < 64) {
-            ++logged;
-            LOG_WARNING(HW_GPU,
-                        "Upload over a GPU-modified image: gpu_addr={:#x} {}x{} format={} levels={} "
-                        "layers={}",
-                        image.gpu_addr, image.info.size.width, image.info.size.height,
-                        static_cast<u32>(image.info.format), image.info.resources.levels,
-                        image.info.resources.layers);
-        }
-    }
-
     TrackImage(image, image_id);
 
     if (image.info.num_samples > 1 && !runtime.CanUploadMSAA()) {
